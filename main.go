@@ -9,17 +9,33 @@ import (
 	"os/exec"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 )
 
+type Vec3 struct {
+	x float64
+	y float64
+	z float64
+}
+
 func main() {
 	r := gin.Default()
 
 	r.POST("/unidock", func(c *gin.Context) {
-		receptor := c.PostForm("receptor")
-		ligand := c.PostForm("ligand")
+		receptor_formfile, err := c.FormFile("receptor")
+		if err != nil {
+			c.String(http.StatusBadRequest, err.Error())
+			return
+		}
+
+		ligand_formfile, err := c.FormFile("ligand")
+		if err != nil {
+			c.String(http.StatusBadRequest, err.Error())
+			return
+		}
 
 		root_path, err := os.Getwd()
 		if err != nil {
@@ -39,30 +55,17 @@ func main() {
 			return
 		}
 
-		receptor_path := path.Join(tmp_path, "receptor.pdbqt")
-		ligand_path := path.Join(tmp_path, "ligand.pdbqt")
+		receptor_path := path.Join(tmp_path, receptor_formfile.Filename)
+		ligand_path := path.Join(tmp_path, ligand_formfile.Filename)
 
-		receptor_file, err := os.Create(receptor_path)
+		c.SaveUploadedFile(receptor_formfile, receptor_path)
+		c.SaveUploadedFile(ligand_formfile, ligand_path)
+
+		center, size, err := searchPocket(receptor_path)
 		if err != nil {
 			c.String(http.StatusInternalServerError, err.Error())
 			return
 		}
-		defer receptor_file.Close()
-
-		receptor_file.WriteString(strings.TrimSpace(receptor))
-
-		receptor_file.Sync()
-
-		ligand_file, err := os.Create(ligand_path)
-		if err != nil {
-			c.String(http.StatusInternalServerError, err.Error())
-			return
-		}
-		defer ligand_file.Close()
-
-		ligand_file.WriteString(strings.TrimSpace(ligand))
-
-		ligand_file.Sync()
 
 		ligand_index_path := path.Join(tmp_path, "ligands.txt")
 		ligand_index_file, err := os.Create(ligand_index_path)
@@ -76,14 +79,6 @@ func main() {
 
 		ligand_index_file.Sync()
 
-		center_x := c.PostForm("center_x")
-		center_y := c.PostForm("center_y")
-		center_z := c.PostForm("center_z")
-
-		size_x := c.PostForm("size_x")
-		size_y := c.PostForm("size_y")
-		size_z := c.PostForm("size_z")
-
 		unidock_path, err := exec.LookPath("unidock")
 		if err != nil {
 			c.String(http.StatusInternalServerError, err.Error())
@@ -91,21 +86,23 @@ func main() {
 		}
 
 		cmd := exec.Command(unidock_path, "--receptor", receptor_path, "--ligand_index", ligand_index_path, "--center_x",
-			center_x, "--center_y", center_y, "--center_z", center_z, "--size_x", size_x, "--size_y", size_y,
-			"--size_z", size_z, "--scoring", "vina", "--search_mode", "balance", "--dir", tmp_path)
+			fmt.Sprint(center.x), "--center_y", fmt.Sprint(center.y), "--center_z", fmt.Sprint(center.z), "--size_x",
+			fmt.Sprint(size.x), "--size_y", fmt.Sprint(size.y), "--size_z", fmt.Sprint(size.z), "--scoring", "vina",
+			"--search_mode", "balance", "--dir", tmp_path)
 
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
 
-		fmt.Println(cmd.String())
+		fmt.Printf("Running command: %s\n", cmd.String())
+
 		err = cmd.Run()
 		if err != nil {
 			c.String(http.StatusInternalServerError, err.Error()+"\n"+stderr.String())
 			return
 		}
 
-		ligand_out_path := path.Join(tmp_path, "ligand_out.pdbqt")
+		ligand_out_path := path.Join(tmp_path, strings.TrimSuffix(ligand_formfile.Filename, path.Ext(ligand_formfile.Filename))+"_out.pdbqt")
 		ligand_out_file, err := os.Open(ligand_out_path)
 		if err != nil {
 			c.String(http.StatusInternalServerError, err.Error())
@@ -139,4 +136,103 @@ func main() {
 		c.String(http.StatusInternalServerError, "Error: No result found")
 	})
 	r.Run(":8080")
+}
+
+func searchPocket(receptor_path string) (center Vec3, size Vec3, err error) {
+	//dir: path to the directory containing the receptor file
+	//receptor_name: name of the receptor file
+
+	dir := path.Dir(receptor_path)
+	receptor_name := strings.TrimSuffix(path.Base(receptor_path), path.Ext(receptor_path))
+	fpocket_path, err := exec.LookPath("fpocket")
+
+	if err != nil {
+		return
+	}
+
+	cmd := exec.Command(fpocket_path, "-f", receptor_path)
+	err = cmd.Run()
+	if err != nil {
+		return
+	}
+
+	pocket1_path := path.Join(dir, receptor_name+"_out", "pockets", "pocket1_atm.pdb")
+	pocket1_file, err := os.Open(pocket1_path)
+	if err != nil {
+		return
+	}
+	defer pocket1_file.Close()
+
+	var pos []Vec3
+
+	scanner := bufio.NewScanner(pocket1_file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "ATOM") {
+			var x, y, z float64
+			x, err = strconv.ParseFloat(strings.TrimSpace(line[30:38]), 64)
+			if err != nil {
+				return
+			}
+			y, err = strconv.ParseFloat(strings.TrimSpace(line[38:46]), 64)
+			if err != nil {
+				return
+			}
+			z, err = strconv.ParseFloat(strings.TrimSpace(line[46:54]), 64)
+			if err != nil {
+				return
+			}
+			pos = append(pos, Vec3{x, y, z})
+		}
+	}
+
+	if err = scanner.Err(); err != nil {
+		fmt.Println("Error reading file:", err)
+		return
+	}
+
+	for i := 0; i < len(pos); i++ {
+		center.x += pos[i].x
+		center.y += pos[i].y
+		center.z += pos[i].z
+	}
+
+	center.x /= float64(len(pos))
+	center.y /= float64(len(pos))
+	center.z /= float64(len(pos))
+
+	// max
+	max := pos[0]
+	for i := 1; i < len(pos); i++ {
+		if pos[i].x > max.x {
+			max.x = pos[i].x
+		}
+		if pos[i].y > max.y {
+			max.y = pos[i].y
+		}
+		if pos[i].z > max.z {
+			max.z = pos[i].z
+		}
+	}
+
+	// min
+	min := pos[0]
+	for i := 1; i < len(pos); i++ {
+		if pos[i].x < min.x {
+			min.x = pos[i].x
+		}
+		if pos[i].y < min.y {
+			min.y = pos[i].y
+		}
+		if pos[i].z < min.z {
+			min.z = pos[i].z
+		}
+	}
+
+	// size
+	size.x = max.x - min.x
+	size.y = max.y - min.y
+	size.z = max.z - min.z
+
+	return
 }
