@@ -79,10 +79,16 @@ func main() {
 
 		ligand_index_file.Sync()
 
-		unidock_path, err := exec.LookPath("unidock")
-		if err != nil {
-			c.String(http.StatusInternalServerError, err.Error())
-			return
+		var unidock_path string
+
+		// check if unidock path defined in environment
+		unidock_path = os.Getenv("UNIDOCK_PATH")
+		if unidock_path == "" {
+			unidock_path, err = exec.LookPath("unidock")
+			if err != nil {
+				c.String(http.StatusInternalServerError, err.Error())
+				return
+			}
 		}
 
 		cmd := exec.Command(unidock_path, "--receptor", receptor_path, "--ligand_index", ligand_index_path, "--center_x",
@@ -144,10 +150,14 @@ func searchPocket(receptor_path string) (center Vec3, size Vec3, err error) {
 
 	dir := path.Dir(receptor_path)
 	receptor_name := strings.TrimSuffix(path.Base(receptor_path), path.Ext(receptor_path))
-	fpocket_path, err := exec.LookPath("fpocket")
-
-	if err != nil {
-		return
+	var fpocket_path string
+	// Check if fpocket path defined in environment
+	fpocket_path = os.Getenv("FPOCKET_PATH")
+	if fpocket_path == "" {
+		fpocket_path, err = exec.LookPath("fpocket")
+		if err != nil {
+			return
+		}
 	}
 
 	cmd := exec.Command(fpocket_path, "-f", receptor_path)

@@ -1,5 +1,16 @@
 # Uni-Dock Server
+
 ## Usage
+You should: 
+- Make sure `unidock` and `fpocket` in your PATH.
+- Or, set `UNIDOCK_PATH` and `FPOCKET_PATH` to your program location.
+
+```sh
+./unidock-server
+```
+
+
+## API
 
 - Method: **Post**
 - URL: `/unidock`
